@@ -1,32 +1,219 @@
-# Prerequisites
-*.d
+#include "I2Cdev.h"
+#include "MPU6050_6Axis_MotionApps20.h"
+#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
+#include "Wire.h"
+#endif
+#include <Servo.h>
 
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
+#define ledrouge 10
+Servo servo_9;
+Servo servo_8;
+int pos = 0;
 
-# Precompiled Headers
-*.gch
-*.pch
 
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
+MPU6050 mpu;
 
-# Fortran module files
-*.mod
-*.smod
+#define OUTPUT_READABLE_YAWPITCHROLL
+#define INTERRUPT_PIN 2
+#define bleu 3
+#define vert 4
+#define bouton 5
+bool blinkState = false;
 
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
+// MPU control/status vars
+bool dmpReady = false;
+uint8_t mpuIntStatus;
+uint8_t devStatus;
+uint16_t packetSize;
+uint16_t fifoCount;
+uint8_t fifoBuffer[64];
 
-# Executables
-*.exe
-*.out
-*.app
+// orientation/motion vars
+Quaternion q;
+VectorInt16 aa;
+VectorInt16 aaReal;
+VectorInt16 aaWorld;
+VectorFloat gravity;
+float euler[3];
+float ypr[3];
+
+// packet structure for InvenSense teapot demo
+uint8_t teapotPacket[14] = { '$', 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x00, '\r', '\n' };
+
+
+volatile bool mpuInterrupt = false;
+void dmpDataReady() {
+  mpuInterrupt = true;
+}
+
+void setup() {
+  servo_9.attach(9);
+  servo_9.write(0);
+  servo_8.attach(8);
+  servo_8.write(0);
+  pinMode(bleu, OUTPUT);
+  pinMode(vert, OUTPUT);
+  pinMode(bouton, INPUT_PULLUP);
+  pinMode(ledrouge, OUTPUT);
+
+#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
+  Wire.begin();
+  Wire.setClock(400000); // 400kHz I2C clock. Comment this line if having compilation difficulties
+#elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
+  Fastwire::setup(400, true);
+#endif
+
+  Serial.begin(115200);
+  Serial.println("Welcome for a new flight !");
+  while (!Serial); // wait for Leonardo enumeration, others continue immediately
+  Serial.println(F("Testing all connection"));
+  Serial.println(F("Initializing I2C devices..."));
+  mpu.initialize();
+  pinMode(INTERRUPT_PIN, INPUT);
+
+  // verify connection
+  Serial.println(F("Testing device connections..."));
+  Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
+
+   //wait for ready
+  Serial.println(F("\nSend any character to begin DMP programming and demo: "));
+  while (Serial.available() && Serial.read()); // empty buffer
+  while (Serial.available());                 // wait for data
+  while (Serial.available() && Serial.read()); // empty buffer again
+
+  // load and configure the DMP
+  Serial.println(F("Initializing DMP..."));
+  devStatus = mpu.dmpInitialize();
+
+  // supply your own gyro offsets here, scaled for min sensitivity
+  mpu.setXGyroOffset(220);
+  mpu.setYGyroOffset(76);
+  mpu.setZGyroOffset(-85);
+  mpu.setZAccelOffset(1788); // 1688 factory default for my test chip
+
+  // make sure it worked (returns 0 if so)
+  if (devStatus == 0) {
+    // turn on the DMP, now that it's ready
+    Serial.println(F("Enabling DMP..."));
+    mpu.setDMPEnabled(true);
+
+    // enable Arduino interrupt detection
+    Serial.println(F("Enabling interrupt detection (Arduino external interrupt 0)..."));
+    attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN), dmpDataReady, RISING);
+    mpuIntStatus = mpu.getIntStatus();
+
+    // set our DMP Ready flag so the main loop() function knows it's okay to use it
+    Serial.println(F("DMP ready! Waiting for first interrupt..."));
+    dmpReady = true;
+    Serial.println("Go for launch !");
+
+    // get expected DMP packet size for later comparison
+    packetSize = mpu.dmpGetFIFOPacketSize();
+  } else {
+    // ERROR!
+    // 1 = initial memory load failed
+    // 2 = DMP configuration updates failed
+    // (if it's going to break, usually the code will be 1)
+    Serial.print(F("DMP Initialization failed (code "));
+    Serial.print(devStatus);
+    Serial.println(F(")"));
+  }
+
+}
+
+void loop() {
+  digitalWrite(bleu, HIGH);
+  digitalWrite(vert, HIGH); 
+  if (!dmpReady) return;
+
+  mpuInterrupt = false;
+  mpuIntStatus = mpu.getIntStatus();
+  fifoCount = mpu.getFIFOCount();
+  if ((mpuIntStatus & 0x10) || fifoCount == 1024) {
+    mpu.resetFIFO();
+    Serial.println(F("FIFO overflow!"));
+  } else if (mpuIntStatus & 0x02) {
+    while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
+    mpu.getFIFOBytes(fifoBuffer, packetSize);
+    fifoCount -= packetSize;
+
+#ifdef OUTPUT_READABLE_QUATERNION
+    // display quaternion values in easy matrix form: w x y z
+    mpu.dmpGetQuaternion(&q, fifoBuffer);
+    Serial.print("quat\t");
+    Serial.print(q.w);
+    Serial.print("\t");
+    Serial.print(q.x);
+    Serial.print("\t");
+    Serial.print(q.y);
+    Serial.print("\t");
+    Serial.println(q.z);
+#endif
+
+//#ifdef OUTPUT_READABLE_EULER
+    // display Euler angles in degrees
+    mpu.dmpGetQuaternion(&q, fifoBuffer);
+    mpu.dmpGetEuler(euler, &q);
+    Serial.print("euler\t");
+    Serial.print(euler[0] * 180 / M_PI);
+    Serial.print("\t");
+    Serial.print(euler[1] * 180 / M_PI);
+    Serial.print("\t");
+    Serial.println(euler[2] * 180 / M_PI);
+//#endif
+    mpu.dmpGetQuaternion(&q, fifoBuffer);
+    mpu.dmpGetAccel(&aa, fifoBuffer);
+    mpu.dmpGetGravity(&gravity, &q);
+    mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
+   // Serial.println(aaReal.z);
+   // Serial.println(digitalRead(bouton));
+
+    if(digitalRead(bouton) == 0){
+      digitalWrite(ledrouge, HIGH);
+        for (pos = 0; pos <= 180; pos += 1) { 
+    servo_9.write(pos);
+    servo_8.write(pos);              
+    delay(15);                      
+  }
+  for (pos = 180; pos >= 0; pos -= 1) { 
+    servo_9.write(pos);
+    servo_8.write(pos);              
+    delay(15);                       
+  }
+ } 
+    if (aaReal.z > 7000) {
+      digitalWrite(bleu, LOW);
+      digitalWrite(vert, LOW);
+      while (!(  digitalRead(bouton) == 0 )) {
+
+        if (!dmpReady) return;
+
+        mpuInterrupt = false;
+        mpuIntStatus = mpu.getIntStatus();
+        fifoCount = mpu.getFIFOCount();
+        if ((mpuIntStatus & 0x10) || fifoCount == 1024) {
+          mpu.resetFIFO();
+          Serial.println(F("FIFO overflow!"));
+        } else if (mpuIntStatus & 0x02) {
+          while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
+          mpu.getFIFOBytes(fifoBuffer, packetSize);
+          fifoCount -= packetSize;
+          digitalWrite(vert, HIGH);
+          mpu.dmpGetQuaternion(&q, fifoBuffer);
+          mpu.dmpGetGravity(&gravity, &q);
+          mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+          servo_9.write(180 - (90 + ypr[1] * 180 / M_PI));
+          servo_8.write(180 - (90 + ypr[2] * 180 / M_PI));
+
+          mpu.dmpGetAccel(&aa, fifoBuffer);
+          mpu.dmpGetGravity(&gravity, &q);
+          mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
+         Serial.print("accélération Z:"); Serial.println(aaReal.z);
+         Serial.print("x"); Serial.println(180 - (90 + ypr[1] * 180 / M_PI));
+         Serial.print("y"); Serial.println(180 - (90 + ypr[2] * 180 / M_PI));
+        }
+      }
+      delay(300);
+    }
+  }
+}
